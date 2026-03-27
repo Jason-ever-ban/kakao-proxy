@@ -1,65 +1,149 @@
 module.exports = async (req, res) => {
-  // 🛑 주의: 아래 주소를 재영님의 '구글 앱스 스크립트 배포 URL(/exec)'로 반드시 바꿔주세요!
-  const GAS_URL = "https://script.google.com/macros/s/AKfycbzztfSpFoLRAHwzhEwqOxaHiWjCtXqSaVm1_cZfWi-U3k8hRPgtttZk_GO_kJE1-2K-/exec";
-  
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  // ★ 여기에 본인의 GAS 웹앱 URL을 넣으세요
+  const GAS_URL = "https://script.google.com/macros/s/AKfycbytrIHGjAzMgz-yWr7tFDHD1SypWZchDtavG-OIpvyA1CJLOvvyNBWbwV_kG8rZimdb/exec";
 
-  // 어떤 상황에서도 무조건 카카오에 보낼 '비상용(Fallback)' 응답
-  const fallback = (msg) => ({
+  // ── 1) 응답 헤더를 가장 먼저 세팅 ──
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Cache-Control", "no-store");
+
+  // ── 2) 카카오 규격 simpleText 응답 생성 헬퍼 ──
+  const kakaoSimpleText = (msg) => ({
     version: "2.0",
-    template: { outputs: [{ simpleText: { text: msg } }] }
+    template: {
+      outputs: [
+        {
+          simpleText: {
+            text: String(msg).substring(0, 490) // 카카오 simpleText는 500자 제한
+          }
+        }
+      ]
+    }
   });
 
-  // 구글이 보낸 응답이 진짜 카카오 규격인지 깐깐하게 검사하는 함수
-  const isKakaoResponse = (obj) => {
-    return !!obj && obj.version === "2.0" && obj.template && Array.isArray(obj.template.outputs);
+  // ── 3) ★ 핵심 추가: 카카오 스킬 응답 스키마 검증 함수 ★ ──
+  //    "유효한 JSON"과 "카카오 스킬 응답 JSON"은 다릅니다!
+  const isValidKakaoResponse = (obj) => {
+    if (!obj || typeof obj !== "object") return false;
+    if (obj.version !== "2.0") return false;
+    if (obj.template && Array.isArray(obj.template.outputs)) return true;
+    if (obj.useCallback === true) return true;
+    return false;
   };
 
+  // ── 디버그 로그 (Vercel Dashboard > Logs에서 확인) ──
+  const log = (msg) => console.log(`[${new Date().toISOString()}] ${msg}`);
+
   try {
-    const body = req.body || {};
-    
-    // [핵심] 딱 3초만 기다리는 타이머 설정
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000); 
-
-    let response;
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // STEP A: req.body 안전하게 읽기
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // Vercel은 req.body를 JavaScript getter로 구현.
+    // malformed JSON이면 접근 순간 예외 발생!
+    let requestBody;
     try {
-      response = await fetch(GAS_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify(body),
-        redirect: "follow",
-        signal: controller.signal // 3초 지나면 여기서 강제 중단!
-      });
-    } catch (fetchError) {
-      clearTimeout(timeout);
-      if (fetchError.name === 'AbortError') {
-        // 🚨 구글이 3초 안에 답을 안 줬을 때! 
-        // 시트 기록은 구글 서버에서 계속 돌아가니, 카카오에겐 성공 메시지를 먼저 줘버립니다.
-        return res.status(200).json(fallback("✅ 예약이 정상 접수되었습니다! (시트 반영 중)"));
-      }
-      throw fetchError;
+      requestBody = req.body ?? {};
+      log("✅ req.body 파싱 성공");
+    } catch (bodyError) {
+      log("❌ req.body 파싱 실패: " + bodyError.message);
+      return res.status(200).json(
+        kakaoSimpleText("[디버그] req.body 파싱 오류: " + bodyError.message)
+      );
     }
-    clearTimeout(timeout);
 
-    // 구글이 3초 안에 준 답변을 까봅니다.
-    const rawText = await response.text();
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // STEP B: GAS 호출 (2.5초 타임아웃)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 카카오 스킬 타임아웃 = 5초 (고정, 변경 불가)
+    // GAS 302 리다이렉트 + 시트 I/O를 고려하면
+    // fetch 자체는 2.5초 이내로 끊어야 안전
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2500);
 
+    let gasResponse;
+    try {
+      log("📡 GAS 호출 시작...");
+      gasResponse = await fetch(GAS_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        body: JSON.stringify(requestBody),
+        redirect: "follow",
+        signal: controller.signal
+      });
+      log("📡 GAS 응답 수신 - status: " + gasResponse.status);
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      const isTimeout = fetchError.name === "AbortError";
+      const msg = isTimeout
+        ? "⏱️ GAS 응답 시간 초과(2.5초). 시트 저장은 됐지만 응답이 느립니다."
+        : "🌐 GAS 통신 오류: " + fetchError.message;
+      log("❌ " + msg);
+      return res.status(200).json(kakaoSimpleText(msg));
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // STEP C: GAS 응답 텍스트 읽기
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    let rawText;
+    try {
+      rawText = await gasResponse.text();
+      log("📄 GAS 응답 본문 (앞 300자): " + rawText.substring(0, 300));
+    } catch (textError) {
+      log("❌ 응답 읽기 실패: " + textError.message);
+      return res.status(200).json(
+        kakaoSimpleText("[디버그] GAS 응답 읽기 실패: " + textError.message)
+      );
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // STEP D: JSON 파싱 시도
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     let parsed;
     try {
       parsed = JSON.parse(rawText);
-    } catch (e) {
-      return res.status(200).json(fallback("구글 파싱 에러 (시트 확인 요망): " + rawText.slice(0, 50)));
+      log("✅ JSON 파싱 성공");
+    } catch (parseError) {
+      log("❌ JSON 파싱 실패 (GAS가 HTML 반환 가능성)");
+      return res.status(200).json(
+        kakaoSimpleText("[디버그] GAS가 JSON이 아닌 응답:\n" + rawText.substring(0, 200))
+      );
     }
 
-    if (!isKakaoResponse(parsed)) {
-      return res.status(200).json(fallback("구글 규격 에러 (시트 확인 요망): " + rawText.slice(0, 50)));
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // STEP E: ★ 카카오 스킬 스키마 검증 ★
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 여기가 기존 코드에 없던 핵심 방어입니다!
+    if (!isValidKakaoResponse(parsed)) {
+      log("⚠️ JSON이지만 카카오 스킬 형식 아님");
+      return res.status(200).json(
+        kakaoSimpleText(
+          "[디버그] GAS가 카카오 형식 아닌 JSON 반환:\n" +
+          JSON.stringify(parsed).substring(0, 200)
+        )
+      );
     }
 
-    // 모든 검문 통과! 완벽한 카카오 응답 반환
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // STEP F: 정상 응답 전달 🎉
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    log("🎉 카카오 스킬 응답 정상 전달!");
     return res.status(200).json(parsed);
 
   } catch (error) {
-    return res.status(200).json(fallback("Vercel 시스템 예외: " + error.message));
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 최후의 방어벽
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    const msg = "[최후방어] Vercel 예외: " + (error?.message || "unknown");
+    console.error(msg, error);
+    try {
+      return res.status(200).json(kakaoSimpleText(msg));
+    } catch (finalError) {
+      res.statusCode = 200;
+      res.end(JSON.stringify(kakaoSimpleText("시스템 오류가 발생했습니다.")));
+    }
   }
 };
