@@ -1,39 +1,65 @@
 module.exports = async (req, res) => {
   // 🛑 주의: 아래 주소를 재영님의 '구글 앱스 스크립트 배포 URL(/exec)'로 반드시 바꿔주세요!
   const GAS_URL = "https://script.google.com/macros/s/AKfycbxrekMu69GUi0lU8djKxRqgVSOhwEnrgS0O7g3NmMPlvGY33ClXeQpd52wItCqWGssL/exec";
+  
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
 
-  // 1. 카카오가 가장 좋아하는 군더더기 없는 헤더 (charset 제거)
-  res.setHeader('Content-Type', 'application/json');
+  // 어떤 상황에서도 무조건 카카오에 보낼 '비상용(Fallback)' 응답
+  const fallback = (msg) => ({
+    version: "2.0",
+    template: { outputs: [{ simpleText: { text: msg } }] }
+  });
+
+  // 구글이 보낸 응답이 진짜 카카오 규격인지 깐깐하게 검사하는 함수
+  const isKakaoResponse = (obj) => {
+    return !!obj && obj.version === "2.0" && obj.template && Array.isArray(obj.template.outputs);
+  };
 
   try {
-    // 2. [핵심] 구글로 데이터 전송! (await를 뺐습니다 = 구글의 대답을 기다리지 않음)
-    fetch(GAS_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(req.body || {}),
-      redirect: "follow"
-    }).catch(err => console.error("GAS 호출 에러:", err)); 
-    // (구글이 시트에 적다가 에러나도 Vercel은 신경 안 씁니다)
+    const body = req.body || {};
+    
+    // [핵심] 딱 3초만 기다리는 타이머 설정
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000); 
 
-    // 3. 카카오에게는 0.1초 만에 바로 '성공' 답변을 던져버립니다!
-    return res.status(200).json({
-      version: "2.0",
-      template: {
-        outputs: [
-          {
-            simpleText: {
-              text: "✅ 예약 요청이 접수되었습니다! 담당자 확인 후 시트에 반영됩니다."
-            }
-          }
-        ]
+    let response;
+    try {
+      response = await fetch(GAS_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify(body),
+        redirect: "follow",
+        signal: controller.signal // 3초 지나면 여기서 강제 중단!
+      });
+    } catch (fetchError) {
+      clearTimeout(timeout);
+      if (fetchError.name === 'AbortError') {
+        // 🚨 구글이 3초 안에 답을 안 줬을 때! 
+        // 시트 기록은 구글 서버에서 계속 돌아가니, 카카오에겐 성공 메시지를 먼저 줘버립니다.
+        return res.status(200).json(fallback("✅ 예약이 정상 접수되었습니다! (시트 반영 중)"));
       }
-    });
+      throw fetchError;
+    }
+    clearTimeout(timeout);
+
+    // 구글이 3초 안에 준 답변을 까봅니다.
+    const rawText = await response.text();
+
+    let parsed;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch (e) {
+      return res.status(200).json(fallback("구글 파싱 에러 (시트 확인 요망): " + rawText.slice(0, 50)));
+    }
+
+    if (!isKakaoResponse(parsed)) {
+      return res.status(200).json(fallback("구글 규격 에러 (시트 확인 요망): " + rawText.slice(0, 50)));
+    }
+
+    // 모든 검문 통과! 완벽한 카카오 응답 반환
+    return res.status(200).json(parsed);
 
   } catch (error) {
-    // 혹시 모를 내부 에러 방어
-    return res.status(200).json({
-      version: "2.0",
-      template: { outputs: [{ simpleText: { text: "시스템 통신 오류: " + error.message } }] }
-    });
+    return res.status(200).json(fallback("Vercel 시스템 예외: " + error.message));
   }
 };
