@@ -1,6 +1,6 @@
 module.exports = async (req, res) => {
   // 🛑 주의: 재영님의 '구글 앱스 스크립트 배포 URL'로 반드시 바꿔주세요!
-  const GAS_URL = "https://script.google.com/macros/s/AKfycbz4VZc55qrUKejjtXi-1jyFR8QktLZT7v_ZHuVKvDzwblQDFlsM3aaf7GXkjFbnRRj3/exec";
+  const GAS_URL = "https://script.google.com/macros/s/AKfycbx9O6XLicry69vDH6p-e-GxJwZIApc50AFAo1IGL4Ozy1NBK6UmEyPuvSWA6xR1ziU4/exec";
 
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
