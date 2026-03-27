@@ -21,7 +21,7 @@ module.exports = async (req, res) => {
   try {
     let requestBody = req.body ?? {};
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2500);
+    const timeoutId = setTimeout(() => controller.abort(), 4200);
 
     let gasResponse;
     try {
